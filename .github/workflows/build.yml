@@ -30,7 +30,7 @@ jobs:
               run: |
                   g++ -O2 -std=c++17 \
                     -o netsymphony \
-                    main.cpp \
+                    src\main.cpp \
                     -lpthread -ldl -lm
                   strip netsymphony
 
@@ -65,7 +65,7 @@ jobs:
             - name: Build
               run: |
                   cl /O2 /std:c++17 /EHsc /W3 ^
-                    main.cpp ^
+                    src\main.cpp ^
                     /Fe:netsymphony.exe ^
                     ws2_32.lib
               shell: cmd
