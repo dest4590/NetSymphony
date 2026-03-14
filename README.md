@@ -17,6 +17,10 @@ NetSymphony captures every IP packet flowing through your network interface and 
 continuously evolving ambient soundscape. Packet size becomes pitch, protocol becomes timbre, TTL and IP addresses
 become panning and volume. The result is a real-time generative piece that is unique to your machine and moment in time.
 
+## Demo video (with sound)
+
+https://github.com/user-attachments/assets/c17b480d-a784-46da-9a38-12fcdfefa84f
+
 ## How it works
 
 ```
