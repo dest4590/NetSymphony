@@ -3,6 +3,7 @@
 #include <atomic>
 #include <cmath>
 #include <vector>
+#define NOMINMAX
 #include <algorithm>
 #include <chrono>
 #include <cstring>
