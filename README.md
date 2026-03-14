@@ -59,7 +59,7 @@ Audio thread  (miniaudio callback, 44.1 kHz stereo)
 git clone https://github.com/dest4590/NetSymphony
 cd NetSymphony
 
-g++ -O2 -std=c++17 -o netsymphony main.cpp -lpthread -ldl -lm
+g++ -O2 -std=c++17 -o netsymphony src/main.cpp -lpthread -ldl -lm
 ```
 
 ### Windows (MSVC)
@@ -74,7 +74,7 @@ cl /O2 /std:c++17 main.cpp ws2_32.lib
 ### macOS
 
 ```bash
-g++ -O2 -std=c++17 -o netsymphony main.cpp -lpthread -ldl -lm
+g++ -O2 -std=c++17 -o netsymphony src/main.cpp -lpthread -ldl -lm
 ```
 
 > macOS note: full promiscuous capture requires `/dev/bpf` access. The build works but may capture fewer packet types

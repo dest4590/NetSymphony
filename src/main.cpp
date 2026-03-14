@@ -2,8 +2,11 @@
 #include <iomanip>
 #include <atomic>
 #include <cmath>
+#include <thread>
 #include <vector>
+#ifndef NOMINMAX
 #define NOMINMAX
+#endif
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -25,11 +28,26 @@
 #define closesocket close
 #ifdef __linux__
 #include <linux/if_ether.h>
+#include <ifaddrs.h>
+#include <net/if.h>
+#include <linux/if_packet.h>
 #endif
 #endif
 
 #define MINIAUDIO_IMPLEMENTATION
 #include "miniaudio.h"
+
+#ifdef _WIN32
+#ifndef SIO_RCVALL
+#define SIO_RCVALL _WSAIOW(IOC_VENDOR,1)
+#endif
+#ifndef SIO_RCVALL_ON
+#define SIO_RCVALL_ON 1
+#endif
+#ifndef SIO_RCVALL_OFF
+#define SIO_RCVALL_OFF 0
+#endif
+#endif
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -95,24 +113,24 @@ enum VoiceType {
 };
 
 struct Delay3D {
-    float buffer[128];
+    float buffer[128]{};
     int writeIdx = 0;
 
     void init() {
         std::fill(std::begin(buffer), std::end(buffer), 0.0f);
     }
 
-    void write(float sample) {
+    void write(const float sample) {
         buffer[writeIdx] = sample;
         writeIdx = (writeIdx + 1) % 128;
     }
 
-    float read(float delaySamples) {
+    [[nodiscard]] float read(const float delaySamples) const {
         float readPos = static_cast<float>(writeIdx) - delaySamples;
         if (readPos < 0) readPos += 128.0f;
-        int idx1 = static_cast<int>(readPos);
-        int idx2 = (idx1 + 1) % 128;
-        float frac = readPos - static_cast<float>(idx1);
+        const int idx1 = static_cast<int>(readPos);
+        const int idx2 = (idx1 + 1) % 128;
+        const float frac = readPos - static_cast<float>(idx1);
         return buffer[idx1] * (1.0f - frac) + buffer[idx2] * frac;
     }
 };
@@ -152,17 +170,17 @@ struct CombFilter {
     int idx = 0;
     float feedback = 0, damp = 0, store = 0;
 
-    void init(int delayLen, float fb, float dp) {
+    void init(const int delayLen, const float fb, const float dp) {
         buf.assign(delayLen, 0.0f);
         feedback = fb;
         damp = dp;
     }
 
-    float process(float in) {
-        float out = buf[idx];
+    float process(const float in) {
+        const float out = buf[idx];
         store = out * (1.0f - damp) + store * damp;
         buf[idx] = in + store * feedback;
-        idx = (idx + 1) % (int) buf.size();
+        idx = (idx + 1) % static_cast<int>(buf.size());
         return out;
     }
 };
@@ -177,10 +195,10 @@ struct AllpassFilter {
         feedback = fb;
     }
 
-    float process(float in) {
-        float bo = buf[idx];
+    float process(const float in) {
+        const float bo = buf[idx];
         buf[idx] = in + bo * feedback;
-        idx = (idx + 1) % (int) buf.size();
+        idx = (idx + 1) % static_cast<int>(buf.size());
         return -in + bo;
     }
 };
@@ -190,9 +208,9 @@ struct Reverb {
     AllpassFilter apL[3], apR[3];
 
     void init() {
-        const int d[6] = {1867, 1993, 1747, 1621, 1453, 1559};
-        const int stereoSpread = 37;
         for (int i = 0; i < 6; i++) {
+            const int d[6] = {1867, 1993, 1747, 1621, 1453, 1559};
+            constexpr int stereoSpread = 37;
             combL[i].init(d[i], 0.95f, 0.40f);
             combR[i].init(d[i] + stereoSpread, 0.95f, 0.40f);
         }
@@ -204,7 +222,7 @@ struct Reverb {
         apR[2].init(420, 0.6f);
     }
 
-    void process(float inL, float inR, float &outL, float &outR) {
+    void process(const float inL, const float inR, float &outL, float &outR) {
         float sL = 0, sR = 0;
         for (int i = 0; i < 6; i++) {
             sL += combL[i].process(inL * 0.010f);
@@ -268,7 +286,8 @@ void audio_data_callback(ma_device *, void *pOutput, const void *, ma_uint32 fra
                 q_tail.store((q_tail.load() + 1) % QUEUE_SIZE);
 
                 int vi = find_voice();
-                Voice &v = voices[vi];
+
+                auto &v = voices[vi];
 
                 v.freq = ev.freq;
                 v.amp = ev.vol;
@@ -284,10 +303,10 @@ void audio_data_callback(ma_device *, void *pOutput, const void *, ma_uint32 fra
                 v.vibPhase = vi * 0.5f;
 
                 v.angle = ev.angleStart;
-                v.angleSpeed = ((vi % 2 == 0) ? 1.0f : -1.0f) * (TWO_PI / (SAMPLE_RATE * (10.0f + (vi % 5))));
+                v.angleSpeed = (vi % 2 == 0 ? 1.0f : -1.0f) * (TWO_PI / (SAMPLE_RATE * (10.0f + vi % 5)));
 
-                v.detune = 1.0f + ((vi % 7) - 3) * 0.0006f;
-                v.detune2 = 1.0f + ((vi % 5) - 2) * 0.0009f;
+                v.detune = 1.0f + (vi % 7 - 3) * 0.0006f;
+                v.detune2 = 1.0f + (vi % 5 - 2) * 0.0009f;
                 v.delay3d.init();
                 v.lpL = 0;
                 v.lpR = 0;
@@ -487,17 +506,17 @@ void process_raw_bytes(const uint8_t *buffer, int size) {
     ip_offset = 14;
 #endif
 
-    if (size < ip_offset + (int) sizeof(IPv4Header)) return;
+    if (size < ip_offset + static_cast<int>(sizeof(IPv4Header))) return;
     const auto *ip = reinterpret_cast<const IPv4Header *>(buffer + ip_offset);
     if ((ip->version_ihl >> 4) != 4) return;
     if (ip->protocol != 6 && ip->protocol != 17) return;
 
     static auto last_note = std::chrono::steady_clock::now();
-    auto now = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
     if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_note).count() < 60) return;
     last_note = now;
 
-    const uint8_t *dst = reinterpret_cast<const uint8_t *>(&ip->dst_ip);
+    const auto *dst = reinterpret_cast<const uint8_t *>(&ip->dst_ip);
     const uint16_t pkt_len = ntohs(ip->total_length);
     const uint16_t id = ntohs(ip->id);
     const uint16_t csum = ntohs(ip->checksum);
@@ -516,16 +535,15 @@ void process_raw_bytes(const uint8_t *buffer, int size) {
         freq = SCALE[scale_idx];
     }
 
-    VoiceType vtype = static_cast<VoiceType>((id + csum + pkt_len) % NUM_TYPES);
+    const auto vtype = static_cast<VoiceType>((id + csum + pkt_len) % NUM_TYPES);
 
-    float norm = std::min((float) pkt_len / 1500.0f, 1.0f);
-    float vol = 0.20f + (std::log1p(norm * 4.0f) / std::log1p(4.0f)) * 0.15f;
+    const float norm = std::min(static_cast<float>(pkt_len) / 1500.0f, 1.0f);
+    const float vol = 0.20f + std::log1p(norm * 4.0f) / std::log1p(4.0f) * 0.15f;
 
-    float startAngle = ((id + dst[2]) % 360) * (TWO_PI / 360.0f);
+    const float startAngle = (id + dst[2]) % 360 * (TWO_PI / 360.0f);
 
-    int head = q_head.load();
-    int next = (head + 1) % QUEUE_SIZE;
-    if (next != q_tail.load()) {
+    const int head = q_head.load();
+    if (const int next = (head + 1) % QUEUE_SIZE; next != q_tail.load()) {
         note_queue[head] = {freq, vol, vtype, startAngle};
         q_head.store(next);
     }
@@ -541,10 +559,10 @@ void process_raw_bytes(const uint8_t *buffer, int size) {
         "\033[90m", "\033[96m", "\033[94m", "\033[92m"
     };
 
-    int bars = (int) (vol * 80);
-    std::cout << colors[(int) vtype]
-            << "[+] " << std::left << std::setw(6) << names[(int) vtype]
-            << "| " << std::right << std::setw(6) << (int) freq << "Hz  "
+    const int bars = static_cast<int>(vol * 80);
+    std::cout << colors[static_cast<int>(vtype)]
+            << "[+] " << std::left << std::setw(6) << names[static_cast<int>(vtype)]
+            << "| " << std::right << std::setw(6) << static_cast<int>(freq) << "Hz  "
             << std::string(bars, '=')
             << "\033[0m\n";
 }
@@ -557,69 +575,196 @@ int main() {
     SetConsoleMode(hOut, dwMode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
 #endif
 
-    std::cout << "\033[96m  === 3D Generative NetSymphony Engine ===\n\033[0m\n";
-    std::cout << "  Headphones Highly Recommended for Binaural 3D Audio.\n";
+    std::cout << "\033[96m  === NetSymphony ===\n\033[0m\n";
     std::cout << "  Instruments: Pad | FMPad | Warm | Wind | Crystal | Cello\n";
     std::cout << "               Halo | Cloud | Drone | Chime | Choir | Dust\n\n";
 
 #ifdef _WIN32
     WSADATA wsaData;
-    WSAStartup(MAKEWORD(2, 2), &wsaData);
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) {
+        std::cerr << "WSAStartup failed.\n";
+        return 1;
+    }
 #endif
 
-    SOCKET sniffer;
+    SOCKET sniffer = INVALID_SOCKET;
+    bool socket_ready = false;
 
 #ifdef _WIN32
     sniffer = socket(AF_INET, SOCK_RAW, IPPROTO_IP);
     if (sniffer == INVALID_SOCKET) {
-        std::cerr << "Run as Administrator!\n";
+        std::cerr << "\033[91m[ERROR] Failed to create raw socket.\n";
+        std::cerr << "        You must run this program as Administrator.\n\033[0m\n";
+        std::cerr << "Solution:\n";
+        std::cerr << "  1. Right-click the .exe file\n";
+        std::cerr << "  2. Select 'Run as administrator'\n\n";
+        WSACleanup();
         return 1;
     }
 
     char hostname[256];
-    gethostname(hostname, sizeof(hostname));
-    hostent *local = gethostbyname(hostname);
-    if (!local) {
-        std::cerr << "Cannot resolve hostname.\n";
+    if (gethostname(hostname, sizeof(hostname)) == SOCKET_ERROR) {
+        std::cerr << "Cannot get hostname.\n";
+        closesocket(sniffer);
+        WSACleanup();
         return 1;
     }
 
-    std::cout << "=== Network Interfaces ===\n";
+    hostent *local = gethostbyname(hostname);
+    if (!local) {
+        std::cerr << "Cannot resolve hostname.\n";
+        closesocket(sniffer);
+        WSACleanup();
+        return 1;
+    }
+
+    std::cout << "=== Available Network Interfaces ===\n";
+    std::vector<in_addr> interfaces;
     int num_ifaces = 0;
-    while (local->h_addr_list[num_ifaces]) {
+
+    while (local->h_addr_list[num_ifaces] && num_ifaces < 10) {
         in_addr addr{};
         addr.s_addr = *reinterpret_cast<u_long *>(local->h_addr_list[num_ifaces]);
+        interfaces.push_back(addr);
         std::cout << "[" << num_ifaces << "] " << inet_ntoa(addr) << "\n";
         num_ifaces++;
     }
 
+    if (num_ifaces == 0) {
+        std::cerr << "No network interfaces found.\n";
+        closesocket(sniffer);
+        WSACleanup();
+        return 1;
+    }
+
     int choice = 0;
     if (num_ifaces > 1) {
-        std::cout << "-> Interface: ";
+        std::cout << "\nSelect interface (0-" << (num_ifaces - 1) << "): ";
         std::cin >> choice;
         if (choice < 0 || choice >= num_ifaces) choice = 0;
     }
 
     sockaddr_in dest{};
     dest.sin_family = AF_INET;
-    dest.sin_addr.s_addr = *reinterpret_cast<u_long *>(local->h_addr_list[choice]);
-    bind(sniffer, reinterpret_cast<struct sockaddr *>(&dest), sizeof(dest));
+    dest.sin_addr = interfaces[choice];
+    dest.sin_port = 0;
 
-    int j = 1;
-    DWORD bytesRet;
-    if (WSAIoctl(sniffer, SIO_RCVALL, &j, sizeof(j), nullptr, 0, &bytesRet, nullptr, nullptr) == SOCKET_ERROR) {
-        std::cerr << "Need Administrator rights.\n";
+    if (bind(sniffer, reinterpret_cast<sockaddr *>(&dest), sizeof(dest)) == SOCKET_ERROR) {
+        std::cerr << "Failed to bind socket to interface.\n";
+        closesocket(sniffer);
+        WSACleanup();
         return 1;
     }
 
+    DWORD dwBytesRet = 0;
+    DWORD dwBufferLen[10];
+    DWORD dwBufferLen_Len = sizeof(dwBufferLen);
+    int j = SIO_RCVALL_ON;
+
+    if (WSAIoctl(sniffer, SIO_RCVALL, &j, sizeof(j), dwBufferLen, dwBufferLen_Len, &dwBytesRet, nullptr, nullptr) ==
+        SOCKET_ERROR) {
+        std::cerr << "\033[91m[ERROR] WSAIoctl SIO_RCVALL failed.\n";
+        std::cerr << "        Administrator rights are required.\n\033[0m\n";
+        closesocket(sniffer);
+        WSACleanup();
+        return 1;
+    }
+
+    socket_ready = true;
+    std::cout << "\n\033[92m✓ Socket initialized successfully\033[0m\n";
+    std::cout << "Listening on: " << inet_ntoa(interfaces[choice]) << "\n\n";
+
 #elif defined(__linux__)
     sniffer = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
+    if (sniffer == INVALID_SOCKET) {
+        std::cerr << "\033[91m[ERROR] Failed to create raw socket.\n";
+        std::cerr << "        You must run this program with sudo or as root.\n";
+        std::cerr << "\033[0m\n";
+        std::cerr << "Solution: Run with 'sudo ./netsymphony'\n\n";
+        return 1;
+    }
+
+    std::cout << "=== Available Network Interfaces ===\n";
+    struct ifaddrs *ifaddr = nullptr;
+    if (getifaddrs(&ifaddr) == -1) {
+        perror("getifaddrs");
+        closesocket(sniffer);
+        return 1;
+    }
+
+    std::vector<std::pair<std::string, std::string> > interfaces;
+    for (struct ifaddrs *ifa = ifaddr; ifa != nullptr; ifa = ifa->ifa_next) {
+        if (!ifa->ifa_addr) continue;
+        if (ifa->ifa_addr->sa_family == AF_INET) {
+            char addr[INET_ADDRSTRLEN] = {0};
+            struct sockaddr_in *sin = reinterpret_cast<struct sockaddr_in *>(ifa->ifa_addr);
+            inet_ntop(AF_INET, &sin->sin_addr, addr, sizeof(addr));
+            bool exists = false;
+            for (auto &p: interfaces)
+                if (p.first == ifa->ifa_name) {
+                    exists = true;
+                    break;
+                }
+            if (!exists) {
+                interfaces.emplace_back(ifa->ifa_name, addr);
+                std::cout << "[" << (interfaces.size() - 1) << "] " << ifa->ifa_name << " " << addr << "\n";
+            }
+        }
+    }
+
+    freeifaddrs(ifaddr);
+
+    if (interfaces.empty()) {
+        std::cerr << "No network interfaces found.\n";
+        closesocket(sniffer);
+        return 1;
+    }
+
+    int choice = 0;
+    if (interfaces.size() > 1) {
+        std::cout << "\nSelect interface (0-" << (interfaces.size() - 1) << "): ";
+        std::cin >> choice;
+        if (choice < 0 || choice >= static_cast<int>(interfaces.size())) choice = 0;
+    }
+
+    struct sockaddr_ll sll;
+    memset(&sll, 0, sizeof(sll));
+    sll.sll_family = AF_PACKET;
+    sll.sll_protocol = htons(ETH_P_ALL);
+    unsigned int ifindex = if_nametoindex(interfaces[choice].first.c_str());
+    if (ifindex == 0) {
+        std::cerr << "Failed to get interface index for " << interfaces[choice].first << "\n";
+        closesocket(sniffer);
+        return 1;
+    }
+    sll.sll_ifindex = static_cast<int>(ifindex);
+
+    if (bind(sniffer, reinterpret_cast<struct sockaddr *>(&sll), sizeof(sll)) == SOCKET_ERROR) {
+        perror("bind");
+        closesocket(sniffer);
+        return 1;
+    }
+
+    socket_ready = true;
+    std::cout << "\n\033[92m✓ Socket initialized successfully (AF_PACKET)\033[0m\n\n";
+
 #else
     sniffer = socket(AF_INET, SOCK_RAW, IPPROTO_TCP);
+    if (sniffer == INVALID_SOCKET) {
+        std::cerr << "\033[91m[ERROR] Failed to create raw socket.\n";
+        std::cerr << "        You may need elevated privileges.\n\033[0m\n";
+        return 1;
+    }
+    socket_ready = true;
+    std::cout << "\n\033[92m✓ Socket initialized successfully\033[0m\n\n";
 #endif
 
-    if (sniffer == INVALID_SOCKET) {
-        std::cerr << "Failed to open raw socket.\n";
+    if (!socket_ready) {
+        std::cerr << "Failed to initialize socket.\n";
+        if (sniffer != INVALID_SOCKET) closesocket(sniffer);
+#ifdef _WIN32
+        WSACleanup();
+#endif
         return 1;
     }
 
@@ -633,23 +778,71 @@ int main() {
 
     ma_device device;
     if (ma_device_init(nullptr, &cfg, &device) != MA_SUCCESS) {
-        std::cerr << "Audio init failed.\n";
+        std::cerr << "\033[91m[ERROR] Audio device initialization failed.\n\033[0m";
+        closesocket(sniffer);
+#ifdef _WIN32
+        WSACleanup();
+#endif
         return 1;
     }
-    ma_device_start(&device);
 
-    std::cout << "\n\033[96m  listening ... rendering 3D chords ...\033[0m\n\n";
-
-    uint8_t buffer[65536];
-    while (true) {
-        int received = recvfrom(sniffer, reinterpret_cast<char *>(buffer), sizeof(buffer), 0, nullptr, nullptr);
-        if (received > 0) process_raw_bytes(buffer, received);
+    if (ma_device_start(&device) != MA_SUCCESS) {
+        std::cerr << "\033[91m[ERROR] Failed to start audio device.\n\033[0m";
+        ma_device_uninit(&device);
+        closesocket(sniffer);
+#ifdef _WIN32
+        WSACleanup();
+#endif
+        return 1;
     }
 
+    std::cout << "\033[96m═══════════════════════════════════════════\033[0m\n";
+    std::cout << "\033[96m  Listening ...                            \033[0m\n";
+    std::cout << "\033[96m═══════════════════════════════════════════\033[0m\n\n";
+    std::cout << "Press Ctrl+C to stop...\n\n";
+
+    uint8_t buffer[65536];
+    int received = 0;
+
+    while (true) {
+        try {
+#ifdef _WIN32
+            received = recvfrom(sniffer, reinterpret_cast<char *>(buffer), sizeof(buffer), 0, nullptr, nullptr);
+#else
+            received = recvfrom(sniffer, reinterpret_cast<char *>(buffer), sizeof(buffer), 0, nullptr, nullptr);
+#endif
+
+            if (received > 0) {
+                process_raw_bytes(buffer, received);
+            } else if (received == SOCKET_ERROR) {
+#ifdef _WIN32
+                int err = WSAGetLastError();
+                if (err == WSAEINTR) {
+                    break;
+                }
+                std::cerr << "Socket error: " << err << "\n";
+#else
+                std::cerr << "Socket error\n";
+#endif
+                std::this_thread::sleep_for(std::chrono::milliseconds(100));
+            }
+        } catch (const std::exception &e) {
+            std::cerr << "Exception in packet processing: " << e.what() << "\n";
+            std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
+    }
+
+    std::cout << "\n\033[93mShutting down...\033[0m\n";
     ma_device_uninit(&device);
     closesocket(sniffer);
+
 #ifdef _WIN32
+    DWORD dwBytesRet2 = 0;
+    int k = SIO_RCVALL_OFF;
+    WSAIoctl(sniffer, SIO_RCVALL, &k, sizeof(k), nullptr, 0, &dwBytesRet2, nullptr, nullptr);
     WSACleanup();
 #endif
+
+    std::cout << "\033[92mCleanup complete. Goodbye!\033[0m\n";
     return 0;
 }
