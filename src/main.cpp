@@ -3,7 +3,7 @@
 #include <atomic>
 #include <cmath>
 #include <vector>
-#define NOMINMAX
+#define _NOMINMAX
 #include <algorithm>
 #include <chrono>
 #include <cstring>
@@ -51,87 +51,106 @@ struct IPv4Header {
 #pragma pack(pop)
 
 constexpr int SAMPLE_RATE = 44100;
-constexpr int MAX_VOICES = 24;
+constexpr int MAX_VOICES = 48;
 constexpr float TWO_PI = 2.0f * static_cast<float>(M_PI);
-constexpr int QUEUE_SIZE = 512;
+constexpr int QUEUE_SIZE = 1024;
+
+constexpr int TICK_INTERVAL = (int) (SAMPLE_RATE * 0.40f);
+constexpr int MAX_NOTES_PER_CHORD = 6;
 
 constexpr float SCALE[] = {
-    54.00f, 64.00f, 72.00f, 81.00f, 96.00f,
-    108.00f, 128.00f, 144.00f, 162.00f, 192.00f,
-    216.00f, 256.00f, 288.00f, 324.00f, 384.00f,
-    432.00f, 512.00f, 576.00f,
+    65.41f,
+    98.00f,
+    130.81f,
+    164.81f,
+    196.00f,
+    246.94f,
+    293.66f,
+    329.63f,
+    369.99f,
+    392.00f,
+    493.88f,
+    523.25f,
+    587.33f,
+    659.25f,
+    739.99f,
+    783.99f
 };
-constexpr int SCALE_SIZE = 18;
+constexpr int SCALE_SIZE = 16;
 
 enum VoiceType {
     SINE_PAD = 0,
     SOFT_FM,
-    SMOOTH_PLUCK,
-    FLUTE_PAD,
-    GLASS_PAD,
-    STRING_PAD,
-    CHOIR_PAD,
-    SHIMMER,
+    WARM_PAD,
+    WIND_PAD,
+    CRYSTAL_PAD,
+    CELLO_PAD,
+    HALO_PAD,
+    AMBIENT_CLOUD,
+    DEEP_DRONE,
+    CHIME_PAD,
+    GHOST_CHOIR,
+    LUNAR_DUST,
     NUM_TYPES
 };
 
+struct Delay3D {
+    float buffer[128];
+    int writeIdx = 0;
+
+    void init() {
+        std::fill(std::begin(buffer), std::end(buffer), 0.0f);
+    }
+
+    void write(float sample) {
+        buffer[writeIdx] = sample;
+        writeIdx = (writeIdx + 1) % 128;
+    }
+
+    float read(float delaySamples) {
+        float readPos = static_cast<float>(writeIdx) - delaySamples;
+        if (readPos < 0) readPos += 128.0f;
+        int idx1 = static_cast<int>(readPos);
+        int idx2 = (idx1 + 1) % 128;
+        float frac = readPos - static_cast<float>(idx1);
+        return buffer[idx1] * (1.0f - frac) + buffer[idx2] * frac;
+    }
+};
+
 struct Voice {
-    float freq = 0;
-    float phase = 0;
-    float phase2 = 0;
-    float phase3 = 0;
-    float phase4 = 0;
-    float phase5 = 0;
-    float phaseMod = 0;
-    float phaseMod2 = 0;
-    float amp = 0;
-    float env = 0;
+    float freq = 0, phase = 0, phase2 = 0, phase3 = 0, phase4 = 0;
+    float phaseMod = 0, amp = 0, env = 0;
     int env_state = 0;
+    float attack_rate = 0, decay_rate = 0;
 
-    float attack_rate = 0;
-    float decay_rate = 0;
+    float angle = 0;
+    float angleSpeed = 0;
+    Delay3D delay3d;
+    float lpL = 0, lpR = 0;
 
-    float panPos = 0.5f;
-    float panTarget = 0.5f;
-    float panSpeed = 0.0002f;
-
-    float vibPhase = 0;
-    float amPhase = 0;
-
+    float vibPhase = 0, amPhase = 0;
     VoiceType type = SINE_PAD;
 
-    std::vector<float> ks_buf;
-    int ks_idx = 0;
-    float ks_lp = 0;
-
-    float fm_ratio = 2.0f;
-    float fm_depth = 0.5f;
-    float fm_ratio2 = 3.0f;
-    float fm_depth2 = 0.1f;
-
-    float detune = 1.0f;
-    float detune2 = 1.0f;
-    float detune3 = 1.0f;
+    float fm_ratio = 2.0f, fm_depth = 0.1f;
+    float detune = 1.0f, detune2 = 1.0f;
 };
 
 struct NoteEvent {
     float freq;
     float vol;
     VoiceType type;
-    float panTarget;
+    float angleStart;
 };
 
 NoteEvent note_queue[QUEUE_SIZE];
 std::atomic<int> q_head{0}, q_tail{0};
-
 Voice voices[MAX_VOICES];
+int audio_sample_tick = 0;
 
 struct CombFilter {
     std::vector<float> buf;
     int idx = 0;
-    float feedback = 0;
-    float damp = 0;
-    float store = 0;
+    float feedback = 0, damp = 0, store = 0;
 
     void init(int delayLen, float fb, float dp) {
         buf.assign(delayLen, 0.0f);
@@ -170,56 +189,37 @@ struct Reverb {
     CombFilter combL[6], combR[6];
     AllpassFilter apL[3], apR[3];
 
-    std::vector<float> preL, preR;
-    int preIdx = 0;
-
     void init() {
-        int pre = (int) (0.035f * SAMPLE_RATE);
-        preL.assign(pre, 0.0f);
-        preR.assign(pre, 0.0f);
-
         const int d[6] = {1867, 1993, 1747, 1621, 1453, 1559};
-        const int stereoSpread = 31;
-
+        const int stereoSpread = 37;
         for (int i = 0; i < 6; i++) {
-            combL[i].init(d[i], 0.90f, 0.35f);
-            combR[i].init(d[i] + stereoSpread, 0.90f, 0.35f);
+            combL[i].init(d[i], 0.95f, 0.40f);
+            combR[i].init(d[i] + stereoSpread, 0.95f, 0.40f);
         }
-
-        apL[0].init(701, 0.5f);
-        apR[0].init(732, 0.5f);
-        apL[1].init(527, 0.5f);
-        apR[1].init(558, 0.5f);
-        apL[2].init(389, 0.5f);
-        apR[2].init(420, 0.5f);
+        apL[0].init(701, 0.6f);
+        apR[0].init(732, 0.6f);
+        apL[1].init(527, 0.6f);
+        apR[1].init(558, 0.6f);
+        apL[2].init(389, 0.6f);
+        apR[2].init(420, 0.6f);
     }
 
     void process(float inL, float inR, float &outL, float &outR) {
-        float pdL = preL[preIdx];
-        float pdR = preR[preIdx];
-        preL[preIdx] = inL;
-        preR[preIdx] = inR;
-        preIdx = (preIdx + 1) % (int) preL.size();
-
-        float mono = (pdL + pdR) * 0.5f * 0.010f;
-
         float sL = 0, sR = 0;
         for (int i = 0; i < 6; i++) {
-            sL += combL[i].process(mono);
-            sR += combR[i].process(mono);
+            sL += combL[i].process(inL * 0.010f);
+            sR += combR[i].process(inR * 0.010f);
         }
-
         for (int i = 0; i < 3; i++) {
             sL = apL[i].process(sL);
             sR = apR[i].process(sR);
         }
-
         outL = sL;
         outR = sR;
     }
 } reverb;
 
-struct LP1S {
+struct MasterLP {
     float sL = 0, sR = 0;
 
     void process(float &L, float &R, float c) {
@@ -228,7 +228,7 @@ struct LP1S {
         L = sL;
         R = sR;
     }
-} reverbLP;
+} filter;
 
 struct DCBlock {
     float xm1 = 0, ym1 = 0;
@@ -241,12 +241,8 @@ struct DCBlock {
     }
 } dcL, dcR;
 
-float global_time = 0;
-
 int find_voice() {
-    for (int i = 0; i < MAX_VOICES; i++)
-        if (voices[i].env_state == 0) return i;
-
+    for (int i = 0; i < MAX_VOICES; i++) if (voices[i].env_state == 0) return i;
     int best = 0;
     float mn = 1e9f;
     for (int i = 0; i < MAX_VOICES; i++) {
@@ -261,99 +257,92 @@ int find_voice() {
 void audio_data_callback(ma_device *, void *pOutput, const void *, ma_uint32 frameCount) {
     auto *fOut = static_cast<float *>(pOutput);
 
-    while (q_tail.load() != q_head.load()) {
-        NoteEvent ev = note_queue[q_tail.load()];
-        q_tail.store((q_tail.load() + 1) % QUEUE_SIZE);
-
-        int vi = find_voice();
-        Voice &v = voices[vi];
-
-        v.freq = ev.freq;
-        v.amp = ev.vol;
-        v.type = ev.type;
-        v.env_state = 1;
-        v.env = 0.0f;
-        v.phase = 0;
-        v.phase2 = (float) vi * 0.30f;
-        v.phase3 = (float) vi * 0.55f;
-        v.phase4 = (float) vi * 0.80f;
-        v.phase5 = (float) vi * 0.15f;
-        v.phaseMod = 0;
-        v.phaseMod2 = 0;
-        v.amPhase = (float) vi * 0.9f;
-        v.vibPhase = (float) vi * 0.50f;
-
-        v.panPos = (vi & 1) ? 0.35f : 0.65f;
-        v.panTarget = ev.panTarget;
-        v.panSpeed = 0.00015f + (vi % 5) * 0.00004f;
-
-        v.detune = 1.0f + ((vi % 7) - 3) * 0.0007f;
-        v.detune2 = 1.0f + ((vi % 5) - 2) * 0.0011f;
-        v.detune3 = 1.0f + ((vi % 9) - 4) * 0.0005f;
-
-        switch (ev.type) {
-            case SINE_PAD:
-                v.attack_rate = 1.0f / (SAMPLE_RATE * 0.25f);
-                v.decay_rate = 0.999970f;
-                break;
-
-            case SOFT_FM:
-                v.attack_rate = 1.0f / (SAMPLE_RATE * 0.18f);
-                v.decay_rate = 0.999955f;
-                v.fm_ratio = 2.0f + (vi % 3) * 0.01f;
-                v.fm_depth = 0.4f + (vi % 4) * 0.08f;
-                break;
-
-            case SMOOTH_PLUCK: {
-                v.attack_rate = 1.0f / (SAMPLE_RATE * 0.005f);
-                v.decay_rate = 0.999940f;
-
-                int ks_len = (int) (SAMPLE_RATE / ev.freq) + 1;
-                v.ks_buf.assign(ks_len, 0.0f);
-                for (int k = 0; k < ks_len; k++)
-                    v.ks_buf[k] = std::sin(TWO_PI * k / ks_len);
-                v.ks_idx = 0;
-                v.ks_lp = 0;
-                break;
-            }
-
-            case FLUTE_PAD:
-                v.attack_rate = 1.0f / (SAMPLE_RATE * 0.30f);
-                v.decay_rate = 0.999975f;
-                break;
-
-            case GLASS_PAD:
-                v.attack_rate = 1.0f / (SAMPLE_RATE * 0.40f);
-                v.decay_rate = 0.999985f;
-                v.fm_ratio = 3.0f + (vi % 3) * 0.005f;
-                v.fm_depth = 0.15f;
-                break;
-
-            case STRING_PAD:
-                v.attack_rate = 1.0f / (SAMPLE_RATE * 1.20f);
-                v.decay_rate = 0.999992f;
-                break;
-
-            case CHOIR_PAD:
-                v.attack_rate = 1.0f / (SAMPLE_RATE * 0.55f);
-                v.decay_rate = 0.999978f;
-                break;
-
-            case SHIMMER:
-                v.attack_rate = 1.0f / (SAMPLE_RATE * 0.70f);
-                v.decay_rate = 0.999980f;
-                v.fm_ratio = 2.0f;
-                v.fm_depth = 0.06f;
-                break;
-
-            default: break;
-        }
-    }
-
-    float globalLFO = 0.92f + 0.08f * std::sin(global_time * 0.12f);
-
     for (ma_uint32 i = 0; i < frameCount; i++) {
-        global_time += 1.0f / SAMPLE_RATE;
+        audio_sample_tick++;
+        if (audio_sample_tick >= TICK_INTERVAL) {
+            audio_sample_tick = 0;
+            int notes_triggered = 0;
+
+            while (q_tail.load() != q_head.load() && notes_triggered < MAX_NOTES_PER_CHORD) {
+                NoteEvent ev = note_queue[q_tail.load()];
+                q_tail.store((q_tail.load() + 1) % QUEUE_SIZE);
+
+                int vi = find_voice();
+                Voice &v = voices[vi];
+
+                v.freq = ev.freq;
+                v.amp = ev.vol;
+                v.type = ev.type;
+                v.env_state = 1;
+                v.env = 0.0f;
+                v.phase = 0;
+                v.phase2 = vi * 0.3f;
+                v.phase3 = vi * 0.7f;
+                v.phase4 = vi * 0.5f;
+                v.phaseMod = 0;
+                v.amPhase = vi * 0.9f;
+                v.vibPhase = vi * 0.5f;
+
+                v.angle = ev.angleStart;
+                v.angleSpeed = ((vi % 2 == 0) ? 1.0f : -1.0f) * (TWO_PI / (SAMPLE_RATE * (10.0f + (vi % 5))));
+
+                v.detune = 1.0f + ((vi % 7) - 3) * 0.0006f;
+                v.detune2 = 1.0f + ((vi % 5) - 2) * 0.0009f;
+                v.delay3d.init();
+                v.lpL = 0;
+                v.lpR = 0;
+
+                switch (ev.type) {
+                    case SINE_PAD: v.attack_rate = 1.0f / (SAMPLE_RATE * 0.8f);
+                        v.decay_rate = 0.999980f;
+                        break;
+                    case SOFT_FM: v.attack_rate = 1.0f / (SAMPLE_RATE * 1.0f);
+                        v.decay_rate = 0.999985f;
+                        v.fm_ratio = 2.0f;
+                        v.fm_depth = 0.2f;
+                        break;
+                    case WARM_PAD: v.attack_rate = 1.0f / (SAMPLE_RATE * 1.2f);
+                        v.decay_rate = 0.999988f;
+                        break;
+                    case WIND_PAD: v.attack_rate = 1.0f / (SAMPLE_RATE * 1.5f);
+                        v.decay_rate = 0.999985f;
+                        break;
+                    case CRYSTAL_PAD: v.attack_rate = 1.0f / (SAMPLE_RATE * 0.8f);
+                        v.decay_rate = 0.999990f;
+                        v.fm_ratio = 3.0f;
+                        v.fm_depth = 0.1f;
+                        break;
+                    case CELLO_PAD: v.attack_rate = 1.0f / (SAMPLE_RATE * 1.4f);
+                        v.decay_rate = 0.999992f;
+                        break;
+                    case HALO_PAD: v.attack_rate = 1.0f / (SAMPLE_RATE * 1.8f);
+                        v.decay_rate = 0.999995f;
+                        break;
+                    case AMBIENT_CLOUD: v.attack_rate = 1.0f / (SAMPLE_RATE * 2.5f);
+                        v.decay_rate = 0.999995f;
+                        v.fm_ratio = 1.5f;
+                        v.fm_depth = 0.05f;
+                        break;
+                    case DEEP_DRONE: v.attack_rate = 1.0f / (SAMPLE_RATE * 2.0f);
+                        v.decay_rate = 0.999996f;
+                        break;
+                    case CHIME_PAD: v.attack_rate = 1.0f / (SAMPLE_RATE * 0.5f);
+                        v.decay_rate = 0.999980f;
+                        v.fm_ratio = 3.5f;
+                        v.fm_depth = 0.4f;
+                        break;
+                    case GHOST_CHOIR: v.attack_rate = 1.0f / (SAMPLE_RATE * 1.5f);
+                        v.decay_rate = 0.999990f;
+                        break;
+                    case LUNAR_DUST: v.attack_rate = 1.0f / (SAMPLE_RATE * 0.6f);
+                        v.decay_rate = 0.999985f;
+                        break;
+                    default: break;
+                }
+                notes_triggered++;
+            }
+        }
+
         float mix_L = 0, mix_R = 0;
 
         for (auto &v: voices) {
@@ -367,173 +356,128 @@ void audio_data_callback(ma_device *, void *pOutput, const void *, ma_uint32 fra
                 }
             } else {
                 v.env *= v.decay_rate;
-                if (v.env < 0.0003f) {
+                if (v.env < 0.0001f) {
                     v.env = 0;
                     v.env_state = 0;
                     continue;
                 }
             }
 
-            v.vibPhase += TWO_PI * 3.5f / SAMPLE_RATE;
-            float vib = 1.0f + 0.0018f * std::sin(v.vibPhase);
-
-            v.panPos += (v.panTarget - v.panPos) * v.panSpeed;
-            float ang = v.panPos * (TWO_PI / 4.0f);
-            float panL = std::cos(ang);
-            float panR = std::sin(ang);
-
-            float freq = v.freq * vib;
-            float dphi = TWO_PI * freq / SAMPLE_RATE;
+            v.vibPhase += TWO_PI * 3.0f / SAMPLE_RATE;
+            float vib = 1.0f + 0.001f * std::sin(v.vibPhase);
+            float dphi = TWO_PI * (v.freq * vib) / SAMPLE_RATE;
             float sample = 0;
 
             switch (v.type) {
                 case SINE_PAD:
-                    sample = std::sin(v.phase3) * 0.30f
-                             + std::sin(v.phase) * 0.55f
-                             + std::sin(v.phase2) * 0.22f;
+                    sample = std::sin(v.phase) * 0.6f + std::sin(v.phase2) * 0.2f + std::sin(v.phase3) * 0.2f;
                     v.phase += dphi;
                     v.phase2 += dphi * v.detune;
                     v.phase3 += dphi * 0.5f;
                     break;
-
-                case SOFT_FM: {
-                    float mod = v.fm_depth * v.env * std::sin(v.phaseMod);
-                    sample = std::sin(v.phase + mod) * 0.75f
-                             + std::sin(v.phase) * 0.25f;
+                case SOFT_FM:
+                    sample = std::sin(v.phase + v.fm_depth * v.env * std::sin(v.phaseMod)) * 0.7f + std::sin(v.phase) *
+                             0.3f;
+                    v.phase += dphi;
+                    v.phaseMod += dphi * v.fm_ratio;
+                    break;
+                case WARM_PAD:
+                    sample = std::sin(v.phase2) * 0.6f + (std::asin(std::sin(v.phase)) * 0.636f) * 0.4f;
+                    v.phase += dphi;
+                    v.phase2 += dphi * v.detune;
+                    break;
+                case CELLO_PAD:
+                    sample = std::sin(v.phase) * 0.5f + std::sin(v.phase2) * 0.25f + std::sin(v.phase3) * 0.25f;
+                    v.phase += dphi;
+                    v.phase2 += dphi * (1.0f + v.detune * 0.001f);
+                    v.phase3 += dphi * (1.0f - v.detune * 0.001f);
+                    break;
+                case DEEP_DRONE:
+                    sample = std::sin(v.phase) * 0.6f + std::sin(v.phase2) * 0.3f + std::sin(v.phase3) * 0.1f;
+                    v.phase += dphi;
+                    v.phase2 += dphi * 0.5f;
+                    v.phase3 += dphi * 1.002f;
+                    break;
+                case CHIME_PAD:
+                    sample = std::sin(v.phase + std::sin(v.phaseMod) * v.fm_depth) * 0.6f + std::sin(v.phase2) * 0.4f;
                     v.phase += dphi;
                     v.phaseMod += dphi * v.fm_ratio;
                     v.phase2 += dphi * v.detune;
                     break;
-                }
-
-                case SMOOTH_PLUCK:
-                    if (!v.ks_buf.empty()) {
-                        int len = (int) v.ks_buf.size();
-                        sample = v.ks_buf[v.ks_idx];
-                        int nx = (v.ks_idx + 1) % len;
-                        float avg = (v.ks_buf[v.ks_idx] + v.ks_buf[nx]) * 0.4992f;
-                        v.ks_lp += (avg - v.ks_lp) * 0.7f;
-                        v.ks_buf[v.ks_idx] = v.ks_lp;
-                        v.ks_idx = nx;
-                    }
-                    break;
-
-                case FLUTE_PAD: {
-                    float s1 = std::sin(v.phase);
-                    float shaped = std::sin(s1 * 1.6f);
-                    sample = shaped * 0.62f
-                             + std::sin(v.phase2) * 0.28f
-                             + std::sin(v.phase3) * 0.18f;
+                case GHOST_CHOIR:
+                    sample = std::sin(v.phase) * 0.4f + std::sin(v.phase2) * 0.3f + std::sin(v.phase3) * 0.3f;
                     v.phase += dphi;
-                    v.phase2 += dphi * v.detune;
-                    v.phase3 += dphi * 0.5f;
+                    v.phase2 += dphi * 1.005f;
+                    v.phase3 += dphi * 0.995f;
                     break;
-                }
-
-                case GLASS_PAD: {
-                    float h1 = std::sin(v.phase);
-                    float h3 = std::sin(v.phase2) * 0.38f;
-                    float h5 = std::sin(v.phase3) * 0.14f;
-                    float fmG = std::sin(v.phaseMod) * v.fm_depth * v.env;
-                    float ring = std::sin(v.phase + fmG);
-                    sample = h1 * 0.50f + ring * 0.20f + h3 + h5;
+                case LUNAR_DUST:
+                    sample = std::sin(v.phase) * 0.3f + std::sin(v.phase2) * 0.3f + std::sin(v.phase3) * 0.2f +
+                             std::sin(v.phase4) * 0.2f;
                     v.phase += dphi;
-                    v.phase2 += dphi * 3.0f * v.detune;
-                    v.phase3 += dphi * 5.0f * v.detune2;
-                    v.phaseMod += dphi * v.fm_ratio;
+                    v.phase2 += dphi * 2.0f;
+                    v.phase3 += dphi * 3.0f;
+                    v.phase4 += dphi * 4.0f;
                     break;
-                }
-
-                case STRING_PAD: {
-                    float d1 = 1.0f + v.detune * 0.0015f;
-                    float d2 = 1.0f - v.detune * 0.0012f;
-                    float d3 = 1.0f + v.detune2 * 0.0022f;
-                    float d4 = 1.0f - v.detune2 * 0.0008f;
-                    sample = std::sin(v.phase) * 0.28f
-                             + std::sin(v.phase2) * 0.28f
-                             + std::sin(v.phase3) * 0.22f
-                             + std::sin(v.phase4) * 0.18f
-                             + std::sin(v.phase5) * 0.14f;
-                    sample += std::sin(v.phase * 2.0f) * 0.06f;
+                default:
+                    sample = std::sin(v.phase);
                     v.phase += dphi;
-                    v.phase2 += dphi * d1;
-                    v.phase3 += dphi * d2;
-                    v.phase4 += dphi * d3;
-                    v.phase5 += dphi * d4;
                     break;
-                }
-
-                case CHOIR_PAD: {
-                    v.amPhase += TWO_PI * 5.2f / SAMPLE_RATE;
-                    float amEnv = 0.82f + 0.18f * std::sin(v.amPhase);
-                    float voice1 = std::sin(v.phase) * amEnv;
-                    float voice2 = std::sin(v.phase2) * (1.0f - amEnv * 0.15f);
-                    float voice3 = std::sin(v.phase3) * (0.85f + amEnv * 0.08f);
-                    float h2 = std::sin(v.phase * 2.0f + 0.3f) * 0.12f;
-                    sample = voice1 * 0.42f + voice2 * 0.38f + voice3 * 0.28f + h2;
-                    v.phase += dphi;
-                    v.phase2 += dphi * v.detune;
-                    v.phase3 += dphi * v.detune2;
-                    break;
-                }
-
-                case SHIMMER: {
-                    float shimVib = 1.0f + 0.0025f * std::sin(v.vibPhase * 0.6f);
-                    float mod = std::sin(v.phaseMod) * v.fm_depth;
-                    float fund = std::sin(v.phase + mod) * 0.55f;
-                    float oct = std::sin(v.phase2 + mod * 0.5f) * 0.30f;
-                    float fifth = std::sin(v.phase3) * 0.18f;
-                    sample = fund + oct * shimVib + fifth;
-                    v.phase += dphi;
-                    v.phase2 += dphi * 2.0f * v.detune;
-                    v.phase3 += dphi * 1.5f * v.detune2;
-                    v.phaseMod += dphi * v.fm_ratio;
-                    break;
-                }
-
-                default: break;
             }
 
-            auto wrap = [](float &p) { if (p > TWO_PI) p -= TWO_PI; };
-            wrap(v.phase);
-            wrap(v.phase2);
-            wrap(v.phase3);
-            wrap(v.phase4);
-            wrap(v.phase5);
-            wrap(v.phaseMod);
-            wrap(v.phaseMod2);
+            if (v.phase > TWO_PI) v.phase -= TWO_PI;
+            if (v.phase2 > TWO_PI) v.phase2 -= TWO_PI;
+            if (v.phase3 > TWO_PI) v.phase3 -= TWO_PI;
+            if (v.phase4 > TWO_PI) v.phase4 -= TWO_PI;
+            if (v.phaseMod > TWO_PI) v.phaseMod -= TWO_PI;
 
-            float out = sample * v.amp * v.env * globalLFO;
-            mix_L += out * panL;
-            mix_R += out * panR;
+            v.angle += v.angleSpeed;
+            if (v.angle > TWO_PI) v.angle -= TWO_PI;
+            else if (v.angle < 0) v.angle += TWO_PI;
+
+            float thetaL = v.angle + static_cast<float>(M_PI / 2.0);
+            float thetaR = v.angle - static_cast<float>(M_PI / 2.0);
+
+            float distL = 1.0f - std::cos(thetaL);
+            float distR = 1.0f - std::cos(thetaR);
+
+            float delayL = distL * 11.0f;
+            float delayR = distR * 11.0f;
+
+            v.delay3d.write(sample);
+            float sL = v.delay3d.read(delayL);
+            float sR = v.delay3d.read(delayR);
+
+            float ampL = 1.0f - (distL * 0.35f);
+            float ampR = 1.0f - (distR * 0.35f);
+
+            float cutL = 0.25f + 0.75f * (ampL / 1.0f);
+            float cutR = 0.25f + 0.75f * (ampR / 1.0f);
+
+            v.lpL += (sL - v.lpL) * cutL;
+            v.lpR += (sR - v.lpR) * cutR;
+
+            float finalVolume = v.amp * v.env * 0.12f;
+            mix_L += v.lpL * ampL * finalVolume;
+            mix_R += v.lpR * ampR * finalVolume;
         }
 
         float revL, revR;
         reverb.process(mix_L, mix_R, revL, revR);
 
-        reverbLP.process(revL, revR, 0.08f);
+        float wet = 0.85f;
+        float outL = mix_L * (1.0f - wet * 0.2f) + revL * wet;
+        float outR = mix_R * (1.0f - wet * 0.2f) + revR * wet;
 
-        float wet = 0.65f;
-        float outL = mix_L * (1.0f - wet * 0.3f) + revL * wet;
-        float outR = mix_R * (1.0f - wet * 0.3f) + revR * wet;
+        filter.process(outL, outR, 0.40f);
 
-        outL = std::tanh(outL * 1.05f) / 1.05f;
-        outR = std::tanh(outR * 1.05f) / 1.05f;
+        outL = std::tanh(outL * 1.35f) / 1.35f;
+        outR = std::tanh(outR * 1.35f) / 1.35f;
 
         outL = dcL.process(outL);
         outR = dcR.process(outR);
 
         fOut[i * 2 + 0] = outL;
         fOut[i * 2 + 1] = outR;
-    }
-}
-
-void send_to_audio(float freq, float vol, VoiceType type, float panTarget) {
-    int head = q_head.load();
-    int next = (head + 1) % QUEUE_SIZE;
-    if (next != q_tail.load()) {
-        note_queue[head] = {freq, vol, type, panTarget};
-        q_head.store(next);
     }
 }
 
@@ -544,68 +488,64 @@ void process_raw_bytes(const uint8_t *buffer, int size) {
 #endif
 
     if (size < ip_offset + (int) sizeof(IPv4Header)) return;
-
     const auto *ip = reinterpret_cast<const IPv4Header *>(buffer + ip_offset);
-
     if ((ip->version_ihl >> 4) != 4) return;
-
     if (ip->protocol != 6 && ip->protocol != 17) return;
 
     static auto last_note = std::chrono::steady_clock::now();
     auto now = std::chrono::steady_clock::now();
-    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_note).count() < 110) return;
+    if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_note).count() < 60) return;
     last_note = now;
 
-    const uint8_t *src = reinterpret_cast<const uint8_t *>(&ip->src_ip);
     const uint8_t *dst = reinterpret_cast<const uint8_t *>(&ip->dst_ip);
     const uint16_t pkt_len = ntohs(ip->total_length);
-    const uint8_t tos_val = ip->tos;
-    const uint8_t ttl_val = ip->ttl;
+    const uint16_t id = ntohs(ip->id);
+    const uint16_t csum = ntohs(ip->checksum);
 
-    int band = (pkt_len > 900) ? 0 : (pkt_len > 300) ? 1 : 2;
-    int idx = band * 5 + (src[3] % 6);
-    if (idx >= SCALE_SIZE) idx = SCALE_SIZE - 1;
-    float freq = SCALE[idx];
+    int scale_idx;
+    float freq;
+
+    if (pkt_len > 1000) {
+        scale_idx = (id ^ csum) % 8;
+        freq = SCALE[scale_idx];
+    } else if (pkt_len < 100) {
+        scale_idx = 8 + ((id ^ csum) % 8);
+        freq = SCALE[scale_idx];
+    } else {
+        scale_idx = (id ^ csum ^ pkt_len) % SCALE_SIZE;
+        freq = SCALE[scale_idx];
+    }
+
+    VoiceType vtype = static_cast<VoiceType>((id + csum + pkt_len) % NUM_TYPES);
 
     float norm = std::min((float) pkt_len / 1500.0f, 1.0f);
-    float vol = 0.10f + (std::log1p(norm * 4.0f) / std::log1p(4.0f)) * 0.10f;
+    float vol = 0.20f + (std::log1p(norm * 4.0f) / std::log1p(4.0f)) * 0.15f;
 
-    float panTarget = (dst[2] % 101) / 100.0f;
+    float startAngle = ((id + dst[2]) % 360) * (TWO_PI / 360.0f);
 
-    VoiceType vtype;
-    bool isUDP = (ip->protocol == 17);
-    bool hasDSCP = (tos_val >> 2) != 0;
+    int head = q_head.load();
+    int next = (head + 1) % QUEUE_SIZE;
+    if (next != q_tail.load()) {
+        note_queue[head] = {freq, vol, vtype, startAngle};
+        q_head.store(next);
+    }
 
-    if (pkt_len < 150 && isUDP) vtype = SHIMMER;
-    else if (pkt_len < 150) vtype = SMOOTH_PLUCK;
-    else if (isUDP && pkt_len > 600) vtype = FLUTE_PAD;
-    else if (isUDP && pkt_len <= 300) vtype = GLASS_PAD;
-    else if (pkt_len > 900 && ttl_val <= 64) vtype = STRING_PAD;
-    else if (ttl_val > 100) vtype = SOFT_FM;
-    else if (src[3] % 2 == 0 && pkt_len > 150) vtype = CHOIR_PAD;
-    else if (hasDSCP) vtype = SHIMMER;
-    else vtype = SINE_PAD;
-
-    send_to_audio(freq, vol, vtype, panTarget);
-
-    const char *names[] = {"Pad  ", "FMPad", "Pluck", "Flute", "Glass", "Strng", "Bell ", "Choir", "Shmr "};
-    const char *colors[] = {
-        "\033[34m",
-        "\033[33m",
-        "\033[32m",
-        "\033[36m",
-        "\033[97m",
-        "\033[35m",
-        "\033[93m",
-        "\033[95m",
-        "\033[96m",
+    const char *names[] = {
+        "Pad  ", "FMPad", "Warm ", "Wind ", "Cryst", "Cello",
+        "Halo ", "Cloud", "Drone", "Chime", "Choir", "Dust "
     };
 
-    int bars = (int) (vol * 120);
+    const char *colors[] = {
+        "\033[34m", "\033[33m", "\033[32m", "\033[36m",
+        "\033[97m", "\033[35m", "\033[93m", "\033[95m",
+        "\033[90m", "\033[96m", "\033[94m", "\033[92m"
+    };
+
+    int bars = (int) (vol * 80);
     std::cout << colors[(int) vtype]
-            << std::left << std::setw(6) << names[(int) vtype]
-            << std::right << std::setw(5) << (int) freq << "Hz  "
-            << std::string(bars, '\xB7')
+            << "[+] " << std::left << std::setw(6) << names[(int) vtype]
+            << "| " << std::right << std::setw(6) << (int) freq << "Hz  "
+            << std::string(bars, '=')
             << "\033[0m\n";
 }
 
@@ -617,8 +557,10 @@ int main() {
     SetConsoleMode(hOut, dwMode | ENABLE_VIRTUAL_TERMINAL_PROCESSING);
 #endif
 
-    std::cout << "\033[34m  ～  NetSymphony  ～\n\033[0m\n";
-    std::cout << "  Voices: Pad · FMPad · Pluck · Flute · Glass · String · Bell · Choir · Shimmer\n\n";
+    std::cout << "\033[96m  === 3D Generative NetSymphony Engine ===\n\033[0m\n";
+    std::cout << "  Headphones Highly Recommended for Binaural 3D Audio.\n";
+    std::cout << "  Instruments: Pad | FMPad | Warm | Wind | Crystal | Cello\n";
+    std::cout << "               Halo | Cloud | Drone | Chime | Choir | Dust\n\n";
 
 #ifdef _WIN32
     WSADATA wsaData;
@@ -672,7 +614,6 @@ int main() {
 
 #elif defined(__linux__)
     sniffer = socket(AF_PACKET, SOCK_RAW, htons(ETH_P_ALL));
-
 #else
     sniffer = socket(AF_INET, SOCK_RAW, IPPROTO_TCP);
 #endif
@@ -697,7 +638,7 @@ int main() {
     }
     ma_device_start(&device);
 
-    std::cout << "\033[34m  listening  ·  breathe  ·\033[0m\n\n";
+    std::cout << "\n\033[96m  listening ... rendering 3D chords ...\033[0m\n\n";
 
     uint8_t buffer[65536];
     while (true) {

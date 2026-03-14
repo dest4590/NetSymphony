@@ -46,19 +46,6 @@ Audio thread  (miniaudio callback, 44.1 kHz stereo)
   └── DC blocking filters
 ```
 
-## Voice types
-
-| Voice            | Trigger condition             | Character                   |
-| ---------------- | ----------------------------- | --------------------------- |
-| **Sine Pad**     | Default / fallback            | Warm, layered sines         |
-| **Soft FM**      | TTL > 100 (Windows / routers) | Metallic, brassy            |
-| **Smooth Pluck** | Small TCP packets             | Clear, brief plucked string |
-| **Flute Pad**    | Large UDP (streaming)         | Breathy, woody              |
-| **Glass Pad**    | Small–medium UDP              | Bell-like, crystalline      |
-| **String Pad**   | Large TCP, TTL ≤ 64           | Lush string ensemble swell  |
-| **Choir Pad**    | Even src IP, medium size      | Vocal, choral texture       |
-| **Shimmer**      | Tiny UDP or DSCP-marked       | High, airy shimmer          |
-
 ## Requirements
 
 - **C++17** compiler (GCC 8+, Clang 7+, MSVC 2019+)
